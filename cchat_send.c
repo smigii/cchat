@@ -111,6 +111,11 @@ struct message create_message()
 	return msg;
 }
 
+void shred_message(struct message* message)
+{
+	free(message->msg);
+}
+
 int main(int argc, char* argv[])
 {
 	struct addrinfo hints, *res;
@@ -159,6 +164,12 @@ int main(int argc, char* argv[])
 	// send
 	bytes_sent = send(sockfd, msg.msg, msg.len, 0);
 	printf("sent [%zu] bytes\n", bytes_sent);
+
+
+	// Clean up
+
+	shred_message(&msg);
+	freeaddrinfo(res);
 
 	return 0;
 }

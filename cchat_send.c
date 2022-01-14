@@ -6,15 +6,97 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <argp.h>
 
 #include "cchat_utils.h"
 
-int main()
+/* ---------------------------------------------------------
+ * USAGE: cchat-send -[pa] -[m|f path/to/file]
+ * -p port
+ * -a addr
+ * -m write message
+ * -f file
+ * ------------------------------------------------------ */
+
+#define ADDR_LEN 64
+#define PORT_LEN 6
+#define PATH_LEN 128
+struct config {
+	char addr[ADDR_LEN];
+	char port[PORT_LEN];
+	char path[PATH_LEN];
+	int fl_msg;
+	int fl_morf;  // Has -m or -f been specified
+};
+
+void init_config(struct config* config)
+{
+	memset(config->addr, 0, ADDR_LEN);
+	memset(config->port, 0, PORT_LEN);
+	memset(config->path, 0, PATH_LEN);
+	config->fl_msg = 0;
+	config->fl_morf = 0;
+}
+
+static int parse_opt (int key, char* arg, struct argp_state* state) {
+	struct config* config = state->input;
+	switch (key){
+		case 'a':
+		{
+			strncpy(config->addr, arg, ADDR_LEN);
+			break;
+		}
+		case 'p':
+		{
+			strncpy(config->port, arg, PORT_LEN);
+			break;
+		}
+		case 'm':
+		{
+			config->fl_msg = 1;
+			config->fl_morf = 1;
+			break;
+		}
+		case 'f':
+		{
+			strncpy(config->path, arg, PATH_LEN);
+			config->fl_morf = 1;
+			break;
+		}
+		default :
+			break;
+	}
+	return 0;
+}
+
+void print_usage()
+{
+	printf("USAGE: cchat-send -a addr -p port -m|-f path/to/file\n");
+}
+
+int main(int argc, char* argv[])
 {
 	struct addrinfo hints, *res;
 	int sockfd;
 	size_t bytes_sent;
 	long status;
+
+	// argp
+	struct config config;
+	init_config(&config);
+	struct argp_option options[] = {
+		{ 0, 'a', "Address",    0, "Destination address." },
+		{ 0, 'p', "Port",       0, "Destination port." },
+		{ 0, 'f', "File",       0, "File to send." },
+		{ 0, 'm', 0,			0, "Write message." },
+		{ 0 }
+	};
+	struct argp argp = {options, parse_opt, 0, 0};
+	argp_parse(&argp, argc, argv, 0, 0, &config);
+	if(config.fl_morf == 0) {
+		print_usage();
+		exit(-1);
+	}
 
 	// getaddrinfo
 	memset(&hints, 0, sizeof hints);
@@ -22,7 +104,7 @@ int main()
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_flags = AI_PASSIVE;
 
-	status = getaddrinfo(NULL, "33666", &hints, &res);
+	status = getaddrinfo(config.addr, config.port, &hints, &res);
 	check_status(status, 0, "addr info");
 
 	// socket

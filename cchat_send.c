@@ -91,10 +91,11 @@ struct message create_message()
 	char buffer[1024];
 	unsigned long buf_len;
 
-	printf("\nCompose message (enter __SEND__ to send):\n");
+	printf("\nEnter --SEND-- to send message.\n");
+	printf("--BEGIN MESSAGE--\n");
 
 	fgets(buffer, 1024, stdin);
-	while(strncmp("__SEND__\n", buffer, 1024) != 0) {
+	while(strncmp("--SEND--\n", buffer, 1024) != 0) {
 		buf_len = strlen(buffer);
 		while(buf_len > (n * block) - msg.len - 1) {
 			n++;

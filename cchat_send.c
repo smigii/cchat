@@ -92,7 +92,7 @@ struct message create_message()
 	unsigned long buf_len;
 
 	printf("\nEnter --SEND-- to send message.\n");
-	printf("--BEGIN MESSAGE--\n");
+	printf("\n--BEGIN MESSAGE--\n");
 
 	fgets(buffer, 1024, stdin);
 	while(strncmp("--SEND--\n", buffer, 1024) != 0) {

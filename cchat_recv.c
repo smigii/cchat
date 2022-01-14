@@ -47,7 +47,7 @@ int main()
 
 	// receive
 	bytes_recvd = recv(new_sockfd, message, MSG_SIZE, 0);
-	printf("received [%zu] bytes\n%s\n", bytes_recvd, message);
+	printf("received [%zu] bytes\n--BEGIN MESSAGE--\n%s\n--END MESSAGE--\n", bytes_recvd, message);
 
 	return 0;
 }

@@ -29,6 +29,11 @@ struct config {
 	int fl_morf;  // Has -m or -f been specified
 };
 
+struct message {
+	char* msg;
+	unsigned long len;
+};
+
 void init_config(struct config* config)
 {
 	memset(config->addr, 0, ADDR_LEN);
@@ -74,6 +79,37 @@ void print_usage()
 	printf("USAGE: cchat-send -a addr -p port -m|-f path/to/file\n");
 }
 
+struct message create_message()
+{
+	#define BUF_SIZE 1024
+
+	int block = 256;
+	int n = 1;
+	struct message msg;
+	msg.msg = (char*)malloc(block);
+	msg.len = 0;
+	char buffer[1024];
+	unsigned long buf_len;
+
+	printf("\nCompose message (enter __SEND__ to send):\n");
+
+	fgets(buffer, 1024, stdin);
+	while(strncmp("__SEND__\n", buffer, 1024) != 0) {
+		buf_len = strlen(buffer);
+		while(buf_len > (n * block) - msg.len - 1) {
+			n++;
+			msg.msg = (char*)realloc(msg.msg, n * block);
+		}
+		strncat(msg.msg, buffer, buf_len);
+		msg.len += buf_len;
+		fgets(buffer, 1024, stdin);
+	}
+
+	printf("\n");
+
+	return msg;
+}
+
 int main(int argc, char* argv[])
 {
 	struct addrinfo hints, *res;
@@ -81,7 +117,8 @@ int main(int argc, char* argv[])
 	size_t bytes_sent;
 	long status;
 
-	// argp
+	// argp ------------------------------------------------
+
 	struct config config;
 	init_config(&config);
 	struct argp_option options[] = {
@@ -97,6 +134,10 @@ int main(int argc, char* argv[])
 		print_usage();
 		exit(-1);
 	}
+
+	struct message msg = create_message();
+
+	// fuckinsenditboys ------------------------------------
 
 	// getaddrinfo
 	memset(&hints, 0, sizeof hints);
@@ -115,7 +156,7 @@ int main(int argc, char* argv[])
 	check_status(status, 0, "connect");
 
 	// send
-	bytes_sent = send(sockfd, "HELLO FUCKO", 12, 0);
+	bytes_sent = send(sockfd, msg.msg, msg.len, 0);
 	printf("sent [%zu] bytes\n", bytes_sent);
 
 	return 0;

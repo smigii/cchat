@@ -30,7 +30,7 @@ struct config {
 
 static int parse_opt (int key, char* arg, struct argp_state* state);
 void print_usage();
-void print_connection_msg(int sockfd);
+void print_connection_msg(int sockfd, struct sockaddr_storage* sas);
 void resolve_addr_port(char* input, char* addr, size_t addr_len, char* port, size_t port_len);
 void init_config(struct config* config);
 void check_status(long status, long ok, const char* msg);
@@ -120,6 +120,7 @@ int main(int argc, char* argv[])
 	// getting all the other peers and adding those connections.
 	if(conf.fl_c) {
 		int sockfd;
+		struct sockaddr_storage* sas;
 
 		memset(&hints, 0, sizeof hints);
 		hints.ai_family = AF_UNSPEC;
@@ -139,7 +140,8 @@ int main(int argc, char* argv[])
 		peer_sockfds[0] = sockfd;
 		n_peers++;
 
-		print_connection_msg(sockfd);
+		sas = (struct sockaddr_storage*)res->ai_addr;
+		print_connection_msg(sockfd, sas);
 	}
 	pthread_t thread;
 	pthread_create(&thread, NULL, input_thread, NULL);
@@ -158,7 +160,7 @@ int main(int argc, char* argv[])
 	}
 
 	struct sockaddr_storage new_addr;
-	socklen_t new_addr_size;
+	socklen_t new_addr_size = sizeof new_addr;
 
 	int num_events;
 	int has_pollin;
@@ -176,7 +178,7 @@ int main(int argc, char* argv[])
 				pfds_peers[n_peers].events = POLLIN;
 				n_peers++;
 
-				print_connection_msg(sockfd);
+				print_connection_msg(sockfd, &new_addr);
 			}
 		}
 
@@ -258,9 +260,14 @@ void print_usage()
 	printf("USAGE: cdemon -l port [-c addr:port, -n name]\n");
 }
 
-void print_connection_msg(int sockfd)
+void print_connection_msg(int sockfd, struct sockaddr_storage* sas)
 {
-	printf("New connection - sockfd [%d]\n\n", sockfd);
+	char buf[32];
+	if(sas->ss_family == AF_INET) {
+		struct sockaddr_in* sa_in = (struct sockaddr_in*)sas;
+		inet_ntop(sa_in->sin_family, &sa_in->sin_addr, buf, 32);
+		printf("New connection - %s:%d - sockfd [%d]\n\n", buf, htons(sa_in->sin_port), sockfd);
+	}
 }
 
 void check_status(long status, long ok, const char* msg)

@@ -1,8 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
-project(cchat C)
+project(cdemon C)
 
 set(CMAKE_C_STANDARD 11)
 
-add_executable(cchat-send cchat_send.c)
-add_executable(cchat_recv cchat_recv.c)
 add_executable(cdemon cdemon.c)
+
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+target_link_libraries(cdemon PRIVATE Threads::Threads)

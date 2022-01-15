@@ -10,10 +10,14 @@
 #include <argp.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 
 #define ADDR_LEN 64
 #define PORT_LEN 6
 #define NAME_LEN 16
+
+#define SEND_BUF_SIZE 256
+#define RECV_BUF_SIZE 256
 
 struct config {
 	char name[NAME_LEN];
@@ -26,50 +30,71 @@ struct config {
 
 static int parse_opt (int key, char* arg, struct argp_state* state);
 void print_usage();
+void print_connection_msg(int sockfd);
 void resolve_addr_port(char* input, char* addr, size_t addr_len, char* port, size_t port_len);
 void init_config(struct config* config);
 void check_status(long status, long ok, const char* msg);
 
-void handle_new_peer();
+struct config conf;
+int peer_sockfds[16];
+int n_peers = 0;
+
+void *input_thread(void *vargp)
+{
+	size_t bytes_sent;
+	char buffer[SEND_BUF_SIZE];
+	sprintf(buffer, "[%s] ", conf.name);
+	size_t offset = strlen(buffer);
+	while(1) {
+		fgets(buffer+offset, SEND_BUF_SIZE, stdin);
+		for(int i = 0; i < n_peers; i++) {
+			bytes_sent = send(peer_sockfds[i], buffer, strlen(buffer), 0);
+			#ifndef NDEBUG
+			printf("Sent [%zu] bytes to sockfd %d\n",bytes_sent, peer_sockfds[i]);
+			#endif
+		}
+		printf("\n");
+	}
+}
 
 int main(int argc, char* argv[])
 {
 	struct addrinfo hints, *res;
-	int sockfd_listen, sockfd_conn;
-	size_t bytes_sent;
+	int sockfd_listen;
 	long status;
+	char recv_buffer[RECV_BUF_SIZE];
 
+	// ========================================================================
 	// argp ===================================================================
 
-	struct config config;
-	init_config(&config);
 	struct argp_option options[] = {
 		{ 0, 'l', "listen port",   0, "Port to listen on." },
 		{ 0, 'c', "address:port",  0, "Connect to port @ address." },
 		{ 0, 'n', "name",          0, "Name to use." },
-//		{ 0, 'm', 0,			   0, "Write message." },
 		{ 0 }
 	};
 	struct argp argp = {options, parse_opt, 0, 0};
-	argp_parse(&argp, argc, argv, 0, 0, &config);
-	if( (!config.fl_c && !config.fl_l) || (config.fl_c && config.fl_l)) {
+
+	init_config(&conf);
+	argp_parse(&argp, argc, argv, 0, 0, &conf);
+
+	if(!conf.fl_l) {
 		print_usage();
-		exit(-1);
+		exit(1);
 	}
 
-	if(config.fl_c)
-		printf("%s %s\n", config.addr, config.c_port);
-
+	// ========================================================================
 	// net ====================================================================
 
-	// Handle listener to get peers
+	// Set up listening -------------------------------------------------------
+
 	// getaddrinfo
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_flags = AI_PASSIVE;
 
-	status = getaddrinfo(NULL, config.l_port, &hints, &res);
+	status = getaddrinfo(NULL, conf.l_port, &hints, &res);
 	check_status(status, 0, "addr info");
 
 	// socket (make non-blocking)
@@ -89,93 +114,88 @@ int main(int argc, char* argv[])
 	status = listen(sockfd_listen, 20);
 	check_status(status, 0, "listen");
 
-	// Handle message sending
+	// Set up sending ---------------------------------------------------------
 
-	// getaddrinfo
-	if(config.fl_c) {
+	// Eventually, this will handle connecting to the specified peer, then
+	// getting all the other peers and adding those connections.
+	if(conf.fl_c) {
+		int sockfd;
+
 		memset(&hints, 0, sizeof hints);
 		hints.ai_family = AF_UNSPEC;
 		hints.ai_socktype = SOCK_STREAM;
 		hints.ai_flags = AI_PASSIVE;
 
-		status = getaddrinfo(config.addr, config.c_port, &hints, &res);
+		status = getaddrinfo(conf.addr, conf.c_port, &hints, &res);
 		check_status(status, 0, "addr info");
 
 		// socket
-		sockfd_conn = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-//		fcntl(sockfd_conn, F_SETFL, O_NONBLOCK);
+		sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
 
 		// connect
-		status = connect(sockfd_conn, res->ai_addr, res->ai_addrlen);
+		status = connect(sockfd, res->ai_addr, res->ai_addrlen);
 		check_status(status, 0, "connect");
 
-		char buffer[256];
-		sprintf(buffer, "[%s] ", config.name);
-		size_t offset = strlen(buffer);
-		while(1) {
-			fgets(buffer+offset, 256, stdin);
-			bytes_sent = send(sockfd_conn, buffer, strlen(buffer), 0);
-			printf("%zu bytes sent\n", bytes_sent);
-		}
-		return 0;
-	}
+		peer_sockfds[0] = sockfd;
+		n_peers++;
 
-	struct pollfd pfds_new_peer[1];
-	struct pollfd pfds_peers[5];
-	struct pollfd pfds_stdin[1];
-	int n_peers = 0;
+		print_connection_msg(sockfd);
+	}
+	pthread_t thread;
+	pthread_create(&thread, NULL, input_thread, NULL);
+
+	// Set up polling ---------------------------------------------------------
+
+	struct pollfd pfds_new_peer[1];  // Monitors new peer requests
+	struct pollfd pfds_peers[16];    // Monitors existing peer connections
 
 	pfds_new_peer[0].fd = sockfd_listen;
 	pfds_new_peer[0].events = POLLIN;
 
-	pfds_stdin[0].fd = 0;
-	pfds_stdin[0].events = POLLIN;
+	for(int i = 0; i < n_peers; i++) {
+		pfds_peers[i].fd = peer_sockfds[i];
+		pfds_peers[i].events = POLLIN;
+	}
 
 	struct sockaddr_storage new_addr;
 	socklen_t new_addr_size;
 
 	int num_events;
+	int has_pollin;
+	int sockfd;
+	size_t bytes_recvd;
 	while(1) {
 		num_events = poll(pfds_new_peer, 1, 50);
 		if(num_events != 0) {
-			int pollin_happened = pfds_new_peer[0].revents & POLLIN;
-			if(pollin_happened) {
-				int new_sockfd = accept(sockfd_listen, (struct sockaddr*)&new_addr, &new_addr_size);
-				fcntl(new_sockfd, F_SETFL, O_NONBLOCK);
-				pfds_peers[n_peers].fd = new_sockfd;
+			has_pollin = pfds_new_peer[0].revents & POLLIN;
+			if(has_pollin) {
+				sockfd = accept(sockfd_listen, (struct sockaddr*)&new_addr, &new_addr_size);
+				peer_sockfds[n_peers] = sockfd;
+				fcntl(sockfd, F_SETFL, O_NONBLOCK);
+				pfds_peers[n_peers].fd = sockfd;
 				pfds_peers[n_peers].events = POLLIN;
 				n_peers++;
 
-				printf("New connection? %d\n", new_sockfd);
+				print_connection_msg(sockfd);
 			}
-			else
-				printf("WHAT THE FUCK?\n");
 		}
 
 		num_events = poll(pfds_peers, n_peers, 50);
 		if(num_events != 0) {
 			for(int i = 0; i < n_peers; i++) {
-				int pollin_happened = pfds_peers[i].revents & POLLIN;
-				if(pollin_happened) {
-					int new_sockfd = pfds_peers[i].fd;
-					size_t total_bytes_recvd = 0;
-					size_t bytes_recvd;
-					#define MSG_SIZE 128
-					char message[MSG_SIZE];
-					bytes_recvd = recv(new_sockfd, message, MSG_SIZE - 1, 0);
-					printf("\nReceived [%zu] bytes from sockfd %d\n%s\n", bytes_recvd, new_sockfd, message);
+				has_pollin = pfds_peers[i].revents & POLLIN;
+				if(has_pollin) {
+					sockfd = pfds_peers[i].fd;
+					bytes_recvd = recv(sockfd, recv_buffer, RECV_BUF_SIZE - 1, 0);
+					recv_buffer[bytes_recvd - 1] = '\0';
+					#ifndef NDEBUG
+					printf("Received [%zu] bytes from sockfd %d\n", bytes_recvd, sockfd);
+					#endif
+					printf("%s\n\n", recv_buffer);
 				}
 			}
 		}
 
-		num_events = poll(pfds_stdin, 1, 50);
-		if(num_events != 0) {
-			int pollin_happened = pfds_stdin[0].revents & POLLIN;
-			if(pollin_happened) {
-				printf("???????\n");
-				pfds_stdin[0].revents = -1;
-			}
-		}
 	}
 
 	return 0;
@@ -236,6 +256,11 @@ void resolve_addr_port(char* input, char* addr, size_t addr_len, char* port, siz
 void print_usage()
 {
 	printf("USAGE: cdemon -l port [-c addr:port, -n name]\n");
+}
+
+void print_connection_msg(int sockfd)
+{
+	printf("New connection - sockfd [%d]\n\n", sockfd);
 }
 
 void check_status(long status, long ok, const char* msg)

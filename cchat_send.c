@@ -88,14 +88,14 @@ struct message create_message()
 	struct message msg;
 	msg.msg = (char*)malloc(block);
 	msg.len = 0;
-	char buffer[1024];
+	char buffer[BUF_SIZE];
 	unsigned long buf_len;
 
-	printf("\nEnter --SEND-- to send message.\n");
+	//printf("\nEnter --SEND-- to send message.\n");
 	printf("\n--BEGIN MESSAGE--\n");
 
-	fgets(buffer, 1024, stdin);
-	while(strncmp("--SEND--\n", buffer, 1024) != 0) {
+	fgets(buffer, BUF_SIZE, stdin);
+	while(strncmp("--SEND--\n", buffer, BUF_SIZE) != 0) {
 		buf_len = strlen(buffer);
 		while(buf_len > (n * block) - msg.len - 1) {
 			n++;
@@ -103,7 +103,7 @@ struct message create_message()
 		}
 		strncat(msg.msg, buffer, buf_len);
 		msg.len += buf_len;
-		fgets(buffer, 1024, stdin);
+		fgets(buffer, BUF_SIZE, stdin);
 	}
 
 	printf("\n");
@@ -141,7 +141,6 @@ int main(int argc, char* argv[])
 		exit(-1);
 	}
 
-	struct message msg = create_message();
 
 	// fuckinsenditboys ------------------------------------
 
@@ -161,14 +160,19 @@ int main(int argc, char* argv[])
 	status = connect(sockfd, res->ai_addr, res->ai_addrlen);
 	check_status(status, 0, "connect");
 
-	// send
-	bytes_sent = send(sockfd, msg.msg, msg.len, 0);
-	printf("sent [%zu] bytes\n", bytes_sent);
+	struct message msg;
 
+	while(1) {
+		msg = create_message();
+
+		// send
+		bytes_sent = send(sockfd, msg.msg, msg.len, 0);
+		printf("sent [%zu] bytes\n", bytes_sent);
+		shred_message(&msg);
+	}
 
 	// Clean up
 
-	shred_message(&msg);
 	freeaddrinfo(res);
 
 	return 0;

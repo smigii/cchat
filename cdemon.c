@@ -89,21 +89,6 @@ int main(int argc, char* argv[])
 	status = listen(sockfd_listen, 20);
 	check_status(status, 0, "listen");
 
-	// accept
-//	new_addr_size = sizeof new_addr;
-//	new_sockfd = accept(sockfd, (struct sockaddr*)&new_addr, &new_addr_size);
-//	while(1) {
-//		total_bytes_recvd = 0;
-//		// receive
-//		while( (bytes_recvd = recv(new_sockfd, message, MSG_SIZE - 1, 0)) != 0) {
-//			if(message[bytes_recvd-1] != '\0')
-//				message[bytes_recvd] = '\0';
-//			printf("%s\n", message);
-//			total_bytes_recvd += bytes_recvd;
-//		}
-//		printf("\nReceived [%zu] bytes from sockfd %d\n\n", total_bytes_recvd, new_sockfd);
-//	}
-
 	// Handle message sending
 
 	// getaddrinfo
@@ -124,46 +109,72 @@ int main(int argc, char* argv[])
 		status = connect(sockfd_conn, res->ai_addr, res->ai_addrlen);
 		check_status(status, 0, "connect");
 
-		bytes_sent = send(sockfd_conn, "oy cunt", 8, 0);
-		printf("%zu bytes sent\n", bytes_sent);
+		char buffer[256];
+		sprintf(buffer, "[%s] ", config.name);
+		size_t offset = strlen(buffer);
+		while(1) {
+			fgets(buffer+offset, 256, stdin);
+			bytes_sent = send(sockfd_conn, buffer, strlen(buffer), 0);
+			printf("%zu bytes sent\n", bytes_sent);
+		}
 		return 0;
 	}
 
-	struct pollfd pfds[1];
+	struct pollfd pfds_new_peer[1];
+	struct pollfd pfds_peers[5];
+	struct pollfd pfds_stdin[1];
+	int n_peers = 0;
 
-	pfds[0].fd = sockfd_listen;
-	pfds[0].events = POLLIN;
+	pfds_new_peer[0].fd = sockfd_listen;
+	pfds_new_peer[0].events = POLLIN;
+
+	pfds_stdin[0].fd = 0;
+	pfds_stdin[0].events = POLLIN;
 
 	struct sockaddr_storage new_addr;
 	socklen_t new_addr_size;
 
 	int num_events;
 	while(1) {
-		num_events = poll(pfds, 1, 500);
-		if(num_events == 0) {
-//			printf("poll timed out?\n");
-		}
-		else {
-			int pollin_happened = pfds[0].revents & POLLIN;
+		num_events = poll(pfds_new_peer, 1, 50);
+		if(num_events != 0) {
+			int pollin_happened = pfds_new_peer[0].revents & POLLIN;
 			if(pollin_happened) {
-				printf("YOOOO\n");
 				int new_sockfd = accept(sockfd_listen, (struct sockaddr*)&new_addr, &new_addr_size);
-				size_t total_bytes_recvd = 0;
-				size_t bytes_recvd;
-				#define MSG_SIZE 128
-				char message[MSG_SIZE];
-				bytes_recvd = recv(new_sockfd, message, MSG_SIZE - 1, 0);
-				// receive
-//				while( (bytes_recvd = recv(new_sockfd, message, MSG_SIZE - 1, 0)) != 0) {
-//					if(message[bytes_recvd-1] != '\0')
-//						message[bytes_recvd] = '\0';
-//					printf("%s\n", message);
-//					total_bytes_recvd += bytes_recvd;
-//				}
-				printf("\nReceived [%zu] bytes from sockfd %d\n%s\n", bytes_recvd, new_sockfd, message);
+				fcntl(new_sockfd, F_SETFL, O_NONBLOCK);
+				pfds_peers[n_peers].fd = new_sockfd;
+				pfds_peers[n_peers].events = POLLIN;
+				n_peers++;
+
+				printf("New connection? %d\n", new_sockfd);
 			}
 			else
 				printf("WHAT THE FUCK?\n");
+		}
+
+		num_events = poll(pfds_peers, n_peers, 50);
+		if(num_events != 0) {
+			for(int i = 0; i < n_peers; i++) {
+				int pollin_happened = pfds_peers[i].revents & POLLIN;
+				if(pollin_happened) {
+					int new_sockfd = pfds_peers[i].fd;
+					size_t total_bytes_recvd = 0;
+					size_t bytes_recvd;
+					#define MSG_SIZE 128
+					char message[MSG_SIZE];
+					bytes_recvd = recv(new_sockfd, message, MSG_SIZE - 1, 0);
+					printf("\nReceived [%zu] bytes from sockfd %d\n%s\n", bytes_recvd, new_sockfd, message);
+				}
+			}
+		}
+
+		num_events = poll(pfds_stdin, 1, 50);
+		if(num_events != 0) {
+			int pollin_happened = pfds_stdin[0].revents & POLLIN;
+			if(pollin_happened) {
+				printf("???????\n");
+				pfds_stdin[0].revents = -1;
+			}
 		}
 	}
 

@@ -141,14 +141,26 @@ int main(int argc, char* argv[])
 	while(1) {
 		num_events = poll(pfds, 1, 500);
 		if(num_events == 0) {
-			printf("poll timed out?\n");
+//			printf("poll timed out?\n");
 		}
 		else {
 			int pollin_happened = pfds[0].revents & POLLIN;
 			if(pollin_happened) {
-				printf("SOMETHING HAPPENED\n");
+				printf("YOOOO\n");
 				int new_sockfd = accept(sockfd_listen, (struct sockaddr*)&new_addr, &new_addr_size);
-				printf("%d new sfd\n", new_sockfd);
+				size_t total_bytes_recvd = 0;
+				size_t bytes_recvd;
+				#define MSG_SIZE 128
+				char message[MSG_SIZE];
+				bytes_recvd = recv(new_sockfd, message, MSG_SIZE - 1, 0);
+				// receive
+//				while( (bytes_recvd = recv(new_sockfd, message, MSG_SIZE - 1, 0)) != 0) {
+//					if(message[bytes_recvd-1] != '\0')
+//						message[bytes_recvd] = '\0';
+//					printf("%s\n", message);
+//					total_bytes_recvd += bytes_recvd;
+//				}
+				printf("\nReceived [%zu] bytes from sockfd %d\n%s\n", bytes_recvd, new_sockfd, message);
 			}
 			else
 				printf("WHAT THE FUCK?\n");

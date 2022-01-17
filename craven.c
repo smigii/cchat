@@ -53,6 +53,8 @@ void *input_loop(void *vargp)
 	size_t bytes_sent;
 	struct cr_msg message;
 	message.type = CR_MSG;
+	time_t thyme = time(NULL);
+	struct tm tm = *localtime(&thyme);
 
 	while(run) {
 		fgets(message.message, SEND_BUF_SIZE, stdin);
@@ -63,23 +65,37 @@ void *input_loop(void *vargp)
 			for(int i = 0; i < n_peers; i++) {
 				printf("%s - %hu - %d\n", peers[i].meta.name, peers[i].meta.l_port, peers[i].sockfd);
 			}
-			printf("\n");
 		}
 		else if(strncmp(":whoami", message.message, 7) == 0) {
-			printf("%s - %hu\n\n", conf.name, conf.l_port);
+			printf("%s - %hu\n", conf.name, conf.l_port);
 		}
 		else if(strncmp(":q", message.message, 2) == 0) {
 			run = 0;
 		}
+		else if(strncmp(":name ", message.message, 6) == 0) {
+			char* new_name = message.message+6;
+			struct cr_name crn;
+			crn.type = CR_NAME;
+			new_name = trim(new_name);
+			strncpy(conf.name, new_name, NAME_LEN);
+			strncpy(crn.name, new_name, NAME_LEN);
+			for(int i = 0; i < n_peers; i++) {
+				send(peers[i].sockfd, &crn, sizeof (struct cr_name), 0);
+			}
+		}
 		else {
 			for(int i = 0; i < n_peers; i++) {
+				trim_r(message.message);
+				thyme = time(NULL);
+				tm = *localtime(&thyme);
+				sprintf(message.time, "%02d:%02d:%02d", tm.tm_hour, tm.tm_min, tm.tm_sec);
 				bytes_sent = send(peers[i].sockfd, &message, cr_msg_size(&message), 0);
 				#ifndef NDEBUG
 				printf("Sent [%zu] bytes to sockfd %d\n",bytes_sent, peers[i].sockfd);
 				#endif
 			}
-			printf("\n");
 		}
+		printf("\n");
 	}
 }
 
@@ -92,7 +108,7 @@ int main(int argc, char* argv[])
 	char port_buf[PORT_LEN]; // For converting port from ushort to char[]
 
 	struct pollfd pfds_new_peer[1];  // Monitors new peer requests
-	struct pollfd pfds_peers[16];    // Monitors existing peer connections
+	struct pollfd pfds_peers[MAX_PEERS];    // Monitors existing peer connections
 
 	// ========================================================================
 	// argp ===================================================================
@@ -213,7 +229,7 @@ int main(int argc, char* argv[])
 						#ifndef NDEBUG
 						printf("Received [%zu] bytes from sockfd %d\n", bytes_recvd, sockfd);
 						#endif
-						printf("[%s] %s\n", peer->meta.name, crm->message);
+						printf("%s [%s] %s\n\n", crm->time, peer->meta.name, crm->message);
 					}
 					else if(crp.type == CR_META) {
 						struct cr_meta* crm = (struct cr_meta*)&crp;
@@ -250,6 +266,11 @@ int main(int argc, char* argv[])
 						memcpy(&peers[i], &peers[n_peers-1], sizeof (struct peer));
 						memcpy(&pfds_peers[i], &pfds_peers[n_peers-1], sizeof (struct pollfd));
 						n_peers--;
+					}
+					else if(crp.type == CR_NAME) {
+						struct cr_name* crn = (struct cr_name*)&crp;
+						printf("Peer name change: [%s] -> [%s]\n\n", peer->meta.name, crn->name);
+						strncpy(peer->meta.name, crn->name, NAME_LEN);
 					}
 					else {
 						printf("RECEIVED UNKNOWN PACKET\n\n");

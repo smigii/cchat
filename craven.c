@@ -12,7 +12,7 @@
 #include <poll.h>
 #include <pthread.h>
 
-#include "cr_packet.h"
+#include "packet.h"
 #include "utils.h"
 
 #define MAX_PEERS 16
@@ -39,7 +39,8 @@ void print_connection_msg(int sockfd, struct sockaddr_storage* sas);
 void init_config(struct config* config);
 void check_status(long status, long ok, const char* msg);
 
-void send_meta(int sockfd);
+int make_connection(char* addr, unsigned short port, struct pollfd* pollfds);
+void send_meta(int sockfd, char forward);
 
 struct config conf;
 struct peer peers[MAX_PEERS];
@@ -53,13 +54,24 @@ void *input_thread(void *vargp)
 
 	while(1) {
 		fgets(message.message, SEND_BUF_SIZE, stdin);
-		for(int i = 0; i < n_peers; i++) {
-			bytes_sent = send(peers[i].sockfd, &message, cr_msg_size(&message), 0);
-			#ifndef NDEBUG
-			printf("Sent [%zu] bytes to sockfd %d\n",bytes_sent, peers[i].sockfd);
-			#endif
+		if(strncmp(":ls", message.message, 3) == 0) {
+			for(int i = 0; i < n_peers; i++) {
+				printf("%s - %hu - %d\n", peers[i].meta.name, peers[i].meta.l_port, peers[i].sockfd);
+			}
+			printf("\n");
 		}
-		printf("\n");
+		else if(strncmp(":whoami", message.message, 7) == 0) {
+			printf("%s - %hu\n\n", conf.name, conf.l_port);
+		}
+		else {
+			for(int i = 0; i < n_peers; i++) {
+				bytes_sent = send(peers[i].sockfd, &message, cr_msg_size(&message), 0);
+			#ifndef NDEBUG
+				printf("Sent [%zu] bytes to sockfd %d\n",bytes_sent, peers[i].sockfd);
+			#endif
+			}
+			printf("\n");
+		}
 	}
 }
 
@@ -69,6 +81,9 @@ int main(int argc, char* argv[])
 	int sockfd_listen;
 	long status;
 	char port_buf[PORT_LEN]; // For converting port from ushort to char[]
+
+	struct pollfd pfds_new_peer[1];  // Monitors new peer requests
+	struct pollfd pfds_peers[16];    // Monitors existing peer connections
 
 	// ========================================================================
 	// argp ===================================================================
@@ -121,59 +136,28 @@ int main(int argc, char* argv[])
 	status = listen(sockfd_listen, 20);
 	check_status(status, 0, "listen");
 
-	// Set up sending ---------------------------------------------------------
+	// CLA Connection ---------------------------------------------------------
 
-	// Eventually, this will handle connecting to the specified peer, then
-	// getting all the other peers and adding those connections.
 	if(conf.fl_c) {
-		int sockfd;
-		struct sockaddr_storage* sas;
-
-		memset(&hints, 0, sizeof hints);
-		hints.ai_family = AF_INET;
-		hints.ai_socktype = SOCK_STREAM;
-		hints.ai_flags = AI_PASSIVE;
-
-		snprintf(port_buf, PORT_LEN, "%hu", conf.c_port); // %hu = unsigned short
-		status = getaddrinfo(conf.addr, port_buf, &hints, &res);
-		check_status(status, 0, "addr info");
-
-		// socket
-		sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-
-		// connect, then send our info
-		status = connect(sockfd, res->ai_addr, res->ai_addrlen);
-		check_status(status, 0, "connect");
-		send_meta(sockfd);
-
-		peers[0].sockfd = sockfd;
-		n_peers++;
-
-		sas = (struct sockaddr_storage*)res->ai_addr;
-		print_connection_msg(sockfd, sas);
+		int sockfd = make_connection(conf.addr, conf.c_port, pfds_peers);
+		send_meta(sockfd, 1);
 	}
+
+	// Input thread -----------------------------------------------------------
+
 	pthread_t thread;
 	pthread_create(&thread, NULL, input_thread, NULL);
 
 	// Polling ----------------------------------------------------------------
 
-	struct pollfd pfds_new_peer[1];  // Monitors new peer requests
-	struct pollfd pfds_peers[16];    // Monitors existing peer connections
-
 	pfds_new_peer[0].fd = sockfd_listen;
 	pfds_new_peer[0].events = POLLIN;
-
-	for(int i = 0; i < n_peers; i++) {
-		pfds_peers[i].fd = peers[i].sockfd;
-		pfds_peers[i].events = POLLIN;
-	}
 
 	struct sockaddr_storage new_addr;
 	socklen_t new_addr_size = sizeof new_addr;
 	struct cr_packet crp;
 	int num_events;
 	int has_pollin;
-	int sockfd;
 	size_t bytes_recvd;
 
 	while(1) {
@@ -181,9 +165,9 @@ int main(int argc, char* argv[])
 		if(num_events != 0) {
 			has_pollin = pfds_new_peer[0].revents & POLLIN;
 			if(has_pollin) {
-				sockfd = accept(sockfd_listen, (struct sockaddr*)&new_addr, &new_addr_size);
-				send_meta(sockfd);
+				int sockfd = accept(sockfd_listen, (struct sockaddr*)&new_addr, &new_addr_size);
 				fcntl(sockfd, F_SETFL, O_NONBLOCK);
+				send_meta(sockfd, 0);
 
 				// Add peer to list
 				struct peer* peer = &(peers[n_peers]);
@@ -204,7 +188,7 @@ int main(int argc, char* argv[])
 			for(int i = 0; i < n_peers; i++) {
 				has_pollin = pfds_peers[i].revents & POLLIN;
 				if(has_pollin) {
-					sockfd = pfds_peers[i].fd;
+					int sockfd = pfds_peers[i].fd;
 					struct peer* peer = &(peers[i]);
 					bytes_recvd = recv(sockfd, &crp, RECV_BUF_SIZE - 1, 0);
 
@@ -226,6 +210,24 @@ int main(int argc, char* argv[])
 						printf("--RECEIVED INFO--\n");
 						printf("From: %s:%hu [%d]\n", buf, htons(sa_in.sin_port), peer->sockfd);
 						printf("Listen Port: %hu\nName: %s\n\n", cri->l_port, cri->name);
+
+						// Tell all other peers to connect to new person
+						if(cri->forward) {
+							struct cr_conn new_conn;
+							new_conn.type = CR_CONN;
+							strncpy(new_conn.addr, buf, ADDR_LEN);
+							new_conn.port = cri->l_port;
+							for(int p = 0; p < n_peers; p++) {
+								if(peers[p].sockfd != sockfd) {
+									send(peers[p].sockfd, &new_conn, sizeof (struct cr_conn), 0);
+								}
+							}
+						}
+					}
+					else if(crp.type == CR_CONN) {
+						struct cr_conn* crc = (struct cr_conn*)&crp;
+						sockfd = make_connection(crc->addr, crc->port, pfds_peers);
+						send_meta(sockfd, 0);
 					}
 					else {
 						printf("RECEIVED UNKNOWN PACKET\n\n");
@@ -309,11 +311,54 @@ void check_status(long status, long ok, const char* msg)
 	}
 }
 
-void send_meta(int sockfd)
+void send_meta(int sockfd, char forward)
 {
 	struct cr_meta cri;
 	cri.type = CR_META;
 	cri.l_port = conf.l_port;
+	cri.forward = forward;
 	strncpy(cri.name, conf.name, NAME_LEN);
 	send(sockfd, &cri, sizeof cri, 0);
+}
+
+int make_connection(char* addr, unsigned short port, struct pollfd* pollfds)
+{
+	// Dumb check
+	for(int i = 0; i < n_peers; i++) {
+		if(peers[i].meta.l_port == port)
+			return 0;
+	}
+
+	struct addrinfo hints, *res;
+	int sockfd;
+	int status;
+	struct sockaddr_storage* sas;
+	char port_buf[PORT_LEN];
+
+	memset(&hints, 0, sizeof hints);
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = AI_PASSIVE;
+
+	snprintf(port_buf, PORT_LEN, "%hu", port); // %hu = unsigned short
+	status = getaddrinfo(addr, port_buf, &hints, &res);
+	check_status(status, 0, "addr info");
+
+	// socket
+	sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+
+	// connect, then send our info
+	status = connect(sockfd, res->ai_addr, res->ai_addrlen);
+	check_status(status, 0, "connect");
+
+	peers[n_peers].sockfd = sockfd;
+	pollfds[n_peers].fd = peers[n_peers].sockfd;
+	pollfds[n_peers].events = POLLIN;
+
+	n_peers++;
+
+	sas = (struct sockaddr_storage*)res->ai_addr;
+	print_connection_msg(sockfd, sas);
+
+	return sockfd;
 }

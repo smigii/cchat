@@ -1,10 +1,11 @@
-#ifndef CRAVEN_MESSAGES_H
-#define CRAVEN_MESSAGES_H
+#ifndef CRAVEN_PACKET_H
+#define CRAVEN_PACKET_H
 
 #include "utils.h"
 
 #define CR_MSG 1
 #define CR_META 2
+#define CR_CONN 3
 
 #define CR_PACKET_SIZE 256
 #define CR_MSG_LEN 64
@@ -29,6 +30,14 @@ struct cr_meta {
 	char type;
 	unsigned short l_port;
 	char name[NAME_LEN];
+	char forward;
+};
+
+// Forward a connection onto other peers
+struct cr_conn {
+	char type;
+	char addr[ADDR_LEN];
+	unsigned short port;
 };
 
 size_t cr_msg_size(struct cr_msg* crm)
@@ -37,4 +46,4 @@ size_t cr_msg_size(struct cr_msg* crm)
 	return (sizeof (struct cr_msg)) - (CR_MSG_LEN - msg_size);
 }
 
-#endif //CRAVEN_MESSAGES_H
+#endif //CRAVEN_PACKET_H

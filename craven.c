@@ -12,45 +12,51 @@
 #include <poll.h>
 #include <pthread.h>
 
-#define ADDR_LEN 64
-#define PORT_LEN 6
-#define NAME_LEN 16
+#include "cr_packet.h"
+#include "utils.h"
 
+#define MAX_PEERS 16
 #define SEND_BUF_SIZE 256
 #define RECV_BUF_SIZE 256
 
 struct config {
 	char name[NAME_LEN];
-	char l_port[PORT_LEN];
-	char c_port[PORT_LEN];
+	unsigned short l_port;
+	unsigned short c_port;
 	char addr[ADDR_LEN];
 	int fl_l;
 	int fl_c;
 };
 
+struct peer {
+	int sockfd;
+	struct cr_meta meta;
+};
+
 static int parse_opt (int key, char* arg, struct argp_state* state);
 void print_usage();
 void print_connection_msg(int sockfd, struct sockaddr_storage* sas);
-void resolve_addr_port(char* input, char* addr, size_t addr_len, char* port, size_t port_len);
 void init_config(struct config* config);
 void check_status(long status, long ok, const char* msg);
 
+void send_meta(int sockfd);
+
 struct config conf;
-int peer_sockfds[16];
+struct peer peers[MAX_PEERS];
 int n_peers = 0;
 
 void *input_thread(void *vargp)
 {
 	size_t bytes_sent;
-	char buffer[SEND_BUF_SIZE];
-	sprintf(buffer, "[%s] ", conf.name);
-	size_t offset = strlen(buffer);
+	struct cr_msg message;
+	message.type = CR_MSG;
+
 	while(1) {
-		fgets(buffer+offset, SEND_BUF_SIZE, stdin);
+		fgets(message.message, SEND_BUF_SIZE, stdin);
 		for(int i = 0; i < n_peers; i++) {
-			bytes_sent = send(peer_sockfds[i], buffer, strlen(buffer), 0);
+			bytes_sent = send(peers[i].sockfd, &message, cr_msg_size(&message), 0);
 			#ifndef NDEBUG
-			printf("Sent [%zu] bytes to sockfd %d\n",bytes_sent, peer_sockfds[i]);
+			printf("Sent [%zu] bytes to sockfd %d\n",bytes_sent, peers[i].sockfd);
 			#endif
 		}
 		printf("\n");
@@ -62,7 +68,7 @@ int main(int argc, char* argv[])
 	struct addrinfo hints, *res;
 	int sockfd_listen;
 	long status;
-	char recv_buffer[RECV_BUF_SIZE];
+	char port_buf[PORT_LEN]; // For converting port from ushort to char[]
 
 	// ========================================================================
 	// argp ===================================================================
@@ -90,11 +96,12 @@ int main(int argc, char* argv[])
 
 	// getaddrinfo
 	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC;
+	hints.ai_family = AF_INET;
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_flags = AI_PASSIVE;
 
-	status = getaddrinfo(NULL, conf.l_port, &hints, &res);
+	snprintf(port_buf, PORT_LEN, "%hu", conf.l_port); // %hu = unsigned short
+	status = getaddrinfo(NULL, port_buf, &hints, &res);
 	check_status(status, 0, "addr info");
 
 	// socket (make non-blocking)
@@ -123,21 +130,23 @@ int main(int argc, char* argv[])
 		struct sockaddr_storage* sas;
 
 		memset(&hints, 0, sizeof hints);
-		hints.ai_family = AF_UNSPEC;
+		hints.ai_family = AF_INET;
 		hints.ai_socktype = SOCK_STREAM;
 		hints.ai_flags = AI_PASSIVE;
 
-		status = getaddrinfo(conf.addr, conf.c_port, &hints, &res);
+		snprintf(port_buf, PORT_LEN, "%hu", conf.c_port); // %hu = unsigned short
+		status = getaddrinfo(conf.addr, port_buf, &hints, &res);
 		check_status(status, 0, "addr info");
 
 		// socket
 		sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
 
-		// connect
+		// connect, then send our info
 		status = connect(sockfd, res->ai_addr, res->ai_addrlen);
 		check_status(status, 0, "connect");
+		send_meta(sockfd);
 
-		peer_sockfds[0] = sockfd;
+		peers[0].sockfd = sockfd;
 		n_peers++;
 
 		sas = (struct sockaddr_storage*)res->ai_addr;
@@ -146,7 +155,7 @@ int main(int argc, char* argv[])
 	pthread_t thread;
 	pthread_create(&thread, NULL, input_thread, NULL);
 
-	// Set up polling ---------------------------------------------------------
+	// Polling ----------------------------------------------------------------
 
 	struct pollfd pfds_new_peer[1];  // Monitors new peer requests
 	struct pollfd pfds_peers[16];    // Monitors existing peer connections
@@ -155,25 +164,33 @@ int main(int argc, char* argv[])
 	pfds_new_peer[0].events = POLLIN;
 
 	for(int i = 0; i < n_peers; i++) {
-		pfds_peers[i].fd = peer_sockfds[i];
+		pfds_peers[i].fd = peers[i].sockfd;
 		pfds_peers[i].events = POLLIN;
 	}
 
 	struct sockaddr_storage new_addr;
 	socklen_t new_addr_size = sizeof new_addr;
-
+	struct cr_packet crp;
 	int num_events;
 	int has_pollin;
 	int sockfd;
 	size_t bytes_recvd;
+
 	while(1) {
 		num_events = poll(pfds_new_peer, 1, 50);
 		if(num_events != 0) {
 			has_pollin = pfds_new_peer[0].revents & POLLIN;
 			if(has_pollin) {
 				sockfd = accept(sockfd_listen, (struct sockaddr*)&new_addr, &new_addr_size);
-				peer_sockfds[n_peers] = sockfd;
+				send_meta(sockfd);
 				fcntl(sockfd, F_SETFL, O_NONBLOCK);
+
+				// Add peer to list
+				struct peer* peer = &(peers[n_peers]);
+				peer->sockfd = sockfd;
+				memset(&(peer->meta), 0, sizeof (struct cr_meta));
+
+				// Monitor the new socket
 				pfds_peers[n_peers].fd = sockfd;
 				pfds_peers[n_peers].events = POLLIN;
 				n_peers++;
@@ -188,12 +205,32 @@ int main(int argc, char* argv[])
 				has_pollin = pfds_peers[i].revents & POLLIN;
 				if(has_pollin) {
 					sockfd = pfds_peers[i].fd;
-					bytes_recvd = recv(sockfd, recv_buffer, RECV_BUF_SIZE - 1, 0);
-					recv_buffer[bytes_recvd - 1] = '\0';
-					#ifndef NDEBUG
-					printf("Received [%zu] bytes from sockfd %d\n", bytes_recvd, sockfd);
-					#endif
-					printf("%s\n\n", recv_buffer);
+					struct peer* peer = &(peers[i]);
+					bytes_recvd = recv(sockfd, &crp, RECV_BUF_SIZE - 1, 0);
+
+					if(crp.type == CR_MSG) {
+						struct cr_msg* crm = (struct cr_msg*)&crp;
+						#ifndef NDEBUG
+						printf("Received [%zu] bytes from sockfd %d\n", bytes_recvd, sockfd);
+						#endif
+						printf("[%s] %s\n", peer->meta.name, crm->message);
+					}
+					else if(crp.type == CR_META) {
+						struct cr_meta* cri = (struct cr_meta*)&crp;
+						memcpy(&(peer->meta), cri, sizeof (struct cr_meta));
+						struct sockaddr_in sa_in;
+						socklen_t len = sizeof (struct sockaddr);
+						getpeername(peer->sockfd, (struct sockaddr*)&sa_in, &len);
+						char buf[32];
+						inet_ntop(sa_in.sin_family, &(sa_in.sin_addr), buf, 32);
+						printf("--RECEIVED INFO--\n");
+						printf("From: %s:%hu [%d]\n", buf, htons(sa_in.sin_port), peer->sockfd);
+						printf("Listen Port: %hu\nName: %s\n\n", cri->l_port, cri->name);
+					}
+					else {
+						printf("RECEIVED UNKNOWN PACKET\n\n");
+					}
+
 				}
 			}
 		}
@@ -209,13 +246,22 @@ static int parse_opt (int key, char* arg, struct argp_state* state) {
 	switch (key){
 		case 'c':
 		{
-			resolve_addr_port(arg, config->addr, ADDR_LEN, config->c_port, PORT_LEN);
+			int i = 0;
+			int delim = -1;
+			while(arg[i] != '\0') {
+				if(arg[i] == ':')
+					delim = i;
+				i++;
+			}
+			strncpy(config->addr, arg, ADDR_LEN);
+			config->addr[delim] = '\0';
+			config->c_port = strtol(arg+delim+1, NULL, 10);
 			config->fl_c = 1;
 			break;
 		}
 		case 'l':
 		{
-			strncpy(config->l_port, arg, PORT_LEN);
+			config->l_port = strtol(arg, NULL, 10);
 			config->fl_l = 1;
 			break;
 		}
@@ -233,31 +279,16 @@ static int parse_opt (int key, char* arg, struct argp_state* state) {
 void init_config(struct config* config)
 {
 	memset(config->addr, 0, ADDR_LEN);
-	memset(config->c_port, 0, PORT_LEN);
-	memset(config->l_port, 0, PORT_LEN);
+	config->l_port = 0;
+	config->c_port = 0;
 	strncpy(config->name, "anon", 5);
 	config->fl_c = 0;
 	config->fl_l = 0;
 }
 
-void resolve_addr_port(char* input, char* addr, size_t addr_len, char* port, size_t port_len)
-{
-	int i = 0;
-	int delim = -1;
-	while(input[i] != '\0') {
-		if(input[i] == ':')
-			delim = i;
-		i++;
-	}
-	strncpy(addr, input, addr_len);
-	addr[delim] = '\0';
-
-	strncpy(port, input+delim+1, port_len);
-}
-
 void print_usage()
 {
-	printf("USAGE: cdemon -l port [-c addr:port, -n name]\n");
+	printf("USAGE: craven -l port [-c addr:port | -n name]\n");
 }
 
 void print_connection_msg(int sockfd, struct sockaddr_storage* sas)
@@ -276,4 +307,13 @@ void check_status(long status, long ok, const char* msg)
 		printf("ofuck: [%s]\n", msg);
 		exit(-1);
 	}
+}
+
+void send_meta(int sockfd)
+{
+	struct cr_meta cri;
+	cri.type = CR_META;
+	cri.l_port = conf.l_port;
+	strncpy(cri.name, conf.name, NAME_LEN);
+	send(sockfd, &cri, sizeof cri, 0);
 }

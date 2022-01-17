@@ -48,7 +48,7 @@ struct peer peers[MAX_PEERS];
 int n_peers = 0;
 int run = 1;
 
-void *input_thread(void *vargp)
+void *input_loop(void *vargp)
 {
 	size_t bytes_sent;
 	struct cr_msg message;
@@ -154,8 +154,8 @@ int main(int argc, char* argv[])
 
 	// Input thread -----------------------------------------------------------
 
-	pthread_t thread;
-	pthread_create(&thread, NULL, input_thread, NULL);
+	pthread_t input_thread;
+	pthread_create(&input_thread, NULL, input_loop, NULL);
 
 	// Polling ----------------------------------------------------------------
 
@@ -261,12 +261,16 @@ int main(int argc, char* argv[])
 
 	}
 
+	pthread_join(input_thread, NULL);
+
 	struct cr_kill crk;
 	crk.type = CR_KILL;
 	for(int i = 0; i < n_peers; i++) {
 		send(peers[i].sockfd, &crk, sizeof (struct cr_kill), 0);
 		close(peers[i].sockfd);
 	}
+
+	freeaddrinfo(res);
 
 	return 0;
 
@@ -396,6 +400,8 @@ int make_connection(char* addr, unsigned short port, struct pollfd* pollfds)
 	sas = (struct sockaddr_storage*)res->ai_addr;
 	print_connection_msg(sockfd, sas);
 	#endif
+
+	freeaddrinfo(res);
 
 	return sockfd;
 }

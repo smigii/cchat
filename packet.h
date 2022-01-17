@@ -6,6 +6,7 @@
 #define CR_MSG 1
 #define CR_META 2
 #define CR_CONN 3
+#define CR_KILL 4
 
 #define CR_PACKET_SIZE 256
 #define CR_MSG_LEN 64
@@ -38,6 +39,10 @@ struct cr_conn {
 	char type;
 	char addr[ADDR_LEN];
 	unsigned short port;
+};
+
+struct cr_kill {
+	char type;
 };
 
 size_t cr_msg_size(struct cr_msg* crm)

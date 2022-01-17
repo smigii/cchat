@@ -1,6 +1,7 @@
 #include <asm-generic/socket.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -45,6 +46,7 @@ void send_meta(int sockfd, char forward);
 struct config conf;
 struct peer peers[MAX_PEERS];
 int n_peers = 0;
+int run = 1;
 
 void *input_thread(void *vargp)
 {
@@ -52,9 +54,12 @@ void *input_thread(void *vargp)
 	struct cr_msg message;
 	message.type = CR_MSG;
 
-	while(1) {
+	while(run) {
 		fgets(message.message, SEND_BUF_SIZE, stdin);
-		if(strncmp(":ls", message.message, 3) == 0) {
+		if(strncmp("\n", message.message, 1) == 0) {
+			continue;
+		}
+		else if(strncmp(":ls", message.message, 3) == 0) {
 			for(int i = 0; i < n_peers; i++) {
 				printf("%s - %hu - %d\n", peers[i].meta.name, peers[i].meta.l_port, peers[i].sockfd);
 			}
@@ -63,12 +68,15 @@ void *input_thread(void *vargp)
 		else if(strncmp(":whoami", message.message, 7) == 0) {
 			printf("%s - %hu\n\n", conf.name, conf.l_port);
 		}
+		else if(strncmp(":q", message.message, 2) == 0) {
+			run = 0;
+		}
 		else {
 			for(int i = 0; i < n_peers; i++) {
 				bytes_sent = send(peers[i].sockfd, &message, cr_msg_size(&message), 0);
-			#ifndef NDEBUG
+				#ifndef NDEBUG
 				printf("Sent [%zu] bytes to sockfd %d\n",bytes_sent, peers[i].sockfd);
-			#endif
+				#endif
 			}
 			printf("\n");
 		}
@@ -80,6 +88,7 @@ int main(int argc, char* argv[])
 	struct addrinfo hints, *res;
 	int sockfd_listen;
 	long status;
+	char addr_buf[ADDR_LEN]; // For holding addresses in presentation form
 	char port_buf[PORT_LEN]; // For converting port from ushort to char[]
 
 	struct pollfd pfds_new_peer[1];  // Monitors new peer requests
@@ -89,9 +98,9 @@ int main(int argc, char* argv[])
 	// argp ===================================================================
 
 	struct argp_option options[] = {
-		{ 0, 'l', "listen port",   0, "Port to listen on." },
+		{ 0, 'l', "port",          0, "Port to listen on." },
 		{ 0, 'c', "address:port",  0, "Connect to port @ address." },
-		{ 0, 'n', "name",          0, "Name to use." },
+		{ 0, 'n', "name",          0, "Name that other peers will see." },
 		{ 0 }
 	};
 	struct argp argp = {options, parse_opt, 0, 0};
@@ -160,7 +169,7 @@ int main(int argc, char* argv[])
 	int has_pollin;
 	size_t bytes_recvd;
 
-	while(1) {
+	while(run) {
 		num_events = poll(pfds_new_peer, 1, 50);
 		if(num_events != 0) {
 			has_pollin = pfds_new_peer[0].revents & POLLIN;
@@ -179,7 +188,9 @@ int main(int argc, char* argv[])
 				pfds_peers[n_peers].events = POLLIN;
 				n_peers++;
 
+				#ifndef NDEBUG
 				print_connection_msg(sockfd, &new_addr);
+				#endif
 			}
 		}
 
@@ -190,6 +201,11 @@ int main(int argc, char* argv[])
 				if(has_pollin) {
 					int sockfd = pfds_peers[i].fd;
 					struct peer* peer = &(peers[i]);
+					struct sockaddr_in sa_in;
+					socklen_t len = sizeof (struct sockaddr);
+					getpeername(peer->sockfd, (struct sockaddr*)&sa_in, &len);
+					inet_ntop(sa_in.sin_family, &(sa_in.sin_addr), addr_buf, 32);
+					unsigned short port = htons(sa_in.sin_port);
 					bytes_recvd = recv(sockfd, &crp, RECV_BUF_SIZE - 1, 0);
 
 					if(crp.type == CR_MSG) {
@@ -200,23 +216,22 @@ int main(int argc, char* argv[])
 						printf("[%s] %s\n", peer->meta.name, crm->message);
 					}
 					else if(crp.type == CR_META) {
-						struct cr_meta* cri = (struct cr_meta*)&crp;
-						memcpy(&(peer->meta), cri, sizeof (struct cr_meta));
-						struct sockaddr_in sa_in;
-						socklen_t len = sizeof (struct sockaddr);
-						getpeername(peer->sockfd, (struct sockaddr*)&sa_in, &len);
-						char buf[32];
-						inet_ntop(sa_in.sin_family, &(sa_in.sin_addr), buf, 32);
+						struct cr_meta* crm = (struct cr_meta*)&crp;
+						memcpy(&(peer->meta), crm, sizeof (struct cr_meta));
+						#ifndef NDEBUG
 						printf("--RECEIVED INFO--\n");
-						printf("From: %s:%hu [%d]\n", buf, htons(sa_in.sin_port), peer->sockfd);
-						printf("Listen Port: %hu\nName: %s\n\n", cri->l_port, cri->name);
+						printf("From: %s:%hu [%d]\n", addr_buf, htons(sa_in.sin_port), peer->sockfd);
+						printf("Listen Port: %hu\nName: %s\n\n", crm->l_port, crm->name);
+						#else
+						printf("Peer connected: %s@%s:%hu - L:%hu\n\n", crm->name, addr_buf, port, crm->l_port);
+						#endif
 
 						// Tell all other peers to connect to new person
-						if(cri->forward) {
+						if(crm->forward) {
 							struct cr_conn new_conn;
 							new_conn.type = CR_CONN;
-							strncpy(new_conn.addr, buf, ADDR_LEN);
-							new_conn.port = cri->l_port;
+							strncpy(new_conn.addr, addr_buf, ADDR_LEN);
+							new_conn.port = crm->l_port;
 							for(int p = 0; p < n_peers; p++) {
 								if(peers[p].sockfd != sockfd) {
 									send(peers[p].sockfd, &new_conn, sizeof (struct cr_conn), 0);
@@ -229,6 +244,13 @@ int main(int argc, char* argv[])
 						sockfd = make_connection(crc->addr, crc->port, pfds_peers);
 						send_meta(sockfd, 0);
 					}
+					else if(crp.type == CR_KILL) {
+						printf("Peer disconnected: %s@%s:%hu - L:%hu\n\n", peer->meta.name, addr_buf, port, peer->meta.l_port);
+						close(peers[i].sockfd);
+						memcpy(&peers[i], &peers[n_peers-1], sizeof (struct peer));
+						memcpy(&pfds_peers[i], &pfds_peers[n_peers-1], sizeof (struct pollfd));
+						n_peers--;
+					}
 					else {
 						printf("RECEIVED UNKNOWN PACKET\n\n");
 					}
@@ -237,6 +259,13 @@ int main(int argc, char* argv[])
 			}
 		}
 
+	}
+
+	struct cr_kill crk;
+	crk.type = CR_KILL;
+	for(int i = 0; i < n_peers; i++) {
+		send(peers[i].sockfd, &crk, sizeof (struct cr_kill), 0);
+		close(peers[i].sockfd);
 	}
 
 	return 0;
@@ -290,7 +319,13 @@ void init_config(struct config* config)
 
 void print_usage()
 {
-	printf("USAGE: craven -l port [-c addr:port | -n name]\n");
+	printf(
+		"USAGE: craven -l port [-c addr:port | -n name]\n"
+		"Commands:\n"
+		"    :ls     -> List current peers\n"
+		"    :q      -> Quit\n"
+		"    :whoami -> Get name and port information\n"
+	);
 }
 
 void print_connection_msg(int sockfd, struct sockaddr_storage* sas)
@@ -332,7 +367,6 @@ int make_connection(char* addr, unsigned short port, struct pollfd* pollfds)
 	struct addrinfo hints, *res;
 	int sockfd;
 	int status;
-	struct sockaddr_storage* sas;
 	char port_buf[PORT_LEN];
 
 	memset(&hints, 0, sizeof hints);
@@ -340,7 +374,7 @@ int make_connection(char* addr, unsigned short port, struct pollfd* pollfds)
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_flags = AI_PASSIVE;
 
-	snprintf(port_buf, PORT_LEN, "%hu", port); // %hu = unsigned short
+	snprintf(port_buf, PORT_LEN, "%hu", port);
 	status = getaddrinfo(addr, port_buf, &hints, &res);
 	check_status(status, 0, "addr info");
 
@@ -357,8 +391,11 @@ int make_connection(char* addr, unsigned short port, struct pollfd* pollfds)
 
 	n_peers++;
 
+	#ifndef NDEBUG
+	struct sockaddr_storage* sas;
 	sas = (struct sockaddr_storage*)res->ai_addr;
 	print_connection_msg(sockfd, sas);
+	#endif
 
 	return sockfd;
 }
